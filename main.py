@@ -2,9 +2,9 @@
 
 from urllib.request import urlopen
 import time
-from bs4 import BeautifulSoup
-from twilio.rest import Client
 import requests
+import sys
+from bs4 import BeautifulSoup
 from pushovercreds import APItoken, USERkey
 
 class RegistrationBot:
@@ -12,9 +12,14 @@ class RegistrationBot:
   Gets classes to register from file
   Sets up important vars
   """
-  def __init__(self):
-    with open("classes.txt", "r") as f:
-      self.classes = [line.rstrip() for line in f.readlines()]
+  def __init__(self, classesFile):
+    with open(classesFile, "r") as f:
+      classesLines = [line.rstrip() for line in f.readlines()]
+      splitLines = [line.split(' ',1) for line in classesLines]
+
+      self.classes = [splitLine[0] for splitLine in splitLines]
+      self.descriptions = [splitLine[1] if len(splitLine) > 1 else None for splitLine in splitLines]
+
     self.previous_state = [0] * (len(self.classes))
 
     self.url = "https://api.pushover.net/1/messages.json"
@@ -73,10 +78,12 @@ class RegistrationBot:
         self.previous_state[index] = open
 
         openString = "Open" if open else "Closed"
+        descriptor = f"{self.descriptions[index]}\n" if self.descriptions[index] else ""
+
         params = {
             "token": APItoken,
             "user": USERkey,
-            "message": f"{arg}\n{req}",
+            "message": f"{descriptor}{req}",
             "title": f"{arg} is {openString}",
             "priority": 0  # Set the priority level (0 for normal)
         }
@@ -93,9 +100,11 @@ class RegistrationBot:
     while True:
       self.statusCheck()
       for i in range(uptimeMultiplier):
+        print(f"running iteration {i}",flush=True)
         self.checkAllClasses()
         time.sleep(checkSeconds)
 
 if __name__ == "__main__":
-  mybot = RegistrationBot()
-  mybot.runContinuously(3,1200)
+  classesFile = sys.argv[1] if len(sys.argv) > 1 else "classes.txt"
+  mybot = RegistrationBot(classesFile)
+  mybot.runContinuously(3,100)
