@@ -6,5 +6,8 @@ COPY requirements.txt .
 RUN pip3 install -r requirements.txt
 
 # run
-COPY . .
-ENTRYPOINT ["python3", "main.py"]
+COPY main.py .
+COPY postmarkcreds.py .
+COPY wait-for-it.sh .
+RUN chmod +x /wait-for-it.sh
+CMD ["python3", "main.py"]

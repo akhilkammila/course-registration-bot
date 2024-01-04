@@ -1,110 +1,161 @@
 # sample run command: python3 main.py 21362
 
-from urllib.request import urlopen
 import time
 import requests
-import sys
+import re
+import json
+import os
+from datetime import datetime
 from bs4 import BeautifulSoup
-from pushovercreds import APItoken, USERkey
+from postmarkcreds import api_key
 
-class RegistrationBot:
-  """
-  Gets classes to register from file
-  Sets up important vars
-  """
-  def __init__(self, classesFile):
-    with open(classesFile, "r") as f:
-      classesLines = [line.rstrip() for line in f.readlines()]
-      splitLines = [line.split(' ',1) for line in classesLines]
+apiBaseUrl = os.getenv('apiBaseUrl')
+if not apiBaseUrl: apiBaseUrl = 'http://127.0.0.1:5000'
 
-      self.classes = [splitLine[0] for splitLine in splitLines]
-      self.descriptions = [splitLine[1] if len(splitLine) > 1 else None for splitLine in splitLines]
+def send_email(email, title, body):
+  postmark_token = api_key
+  sender_email = 'notifier@gtregistration.com'
+  subject = f'[GT Registration] {title}'
+  text_body = f'{body}'
 
-    self.previous_state = [0] * (len(self.classes))
+  headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Postmark-Server-Token': postmark_token
+  }
+  payload = {
+      'From': sender_email,
+      'To': email,
+      'Subject': subject,
+      'TextBody': text_body,
+      'MessageStream': 'outbound'
+  }
+  response = requests.post('https://api.postmarkapp.com/email', headers=headers, data=json.dumps(payload))
+  return response
 
-    self.url = "https://api.pushover.net/1/messages.json"
+def statusToText(status):
+  if status == 0: return "Accurate class data unavailable"
+  if status == 1: return "Open"
+  if status == 2: return "Waitlist Open"
+  if status == 3: return "Waitlist Closed"
+  if status == 4: return "Class does not exist"
+  return "Error"
+
+
+"""
+Gets the status of a given class given crn
+Statuses
+  0: undefined (unchecked, or negatives error)
+  1: open
+  2: closed, waitlist open
+  3: closed, waitlist closed
+  4: not a class
+"""
+def getClassStatus(crn):
+  # get proper url
+  month = datetime.now().month
+  year = datetime.now().year
+  if month > 8:
+    month = 2
+    year += 1
+  elif 3 <= month <= 8: month = 8
+  elif month <= 2: month = 2
+  yearstring = f"{year:04}{month:02}"
   
-  """
-  Sends a simple message with the classes being tracked
-  Used to check that program is still running
-  """
-  def statusCheck(self):
-    params = {
-      "token": APItoken,
-      "user": USERkey,
-      "message": f"{self.classes}",
-      "title": f"Status Check: We are currently tracking these classes",
-      "priority": 0  # Set the priority level (0 for normal)
-    }
-    response = requests.post(self.url, data=params)
+  url = f"https://registration.banner.gatech.edu/StudentRegistrationSsb/ssb/searchResults/getEnrollmentInfo?term={yearstring}&courseReferenceNumber={crn}"
 
-  """
-  Helper method that gets the registration info for a class given its url
-  """
-  def getClassStatus(self, url):
-    html = urlopen(url).read()
-    soup = BeautifulSoup(html, features="html.parser")
+  html = requests.get(url, verify=False).content
+  soup = BeautifulSoup(html, features="html.parser")
+  
+  # get six vals: enrollment actual, maximum, seats available, waitlist capacity, actual, seats available
+  text = soup.get_text()
+  pattern = r":\s*(\d+)"
+  numbers = re.findall(pattern, text)
+  numbers = [int(num) for num in numbers]
+
+  # get status code
+  if len(numbers) != 6: return 4 # invalid class
+
+  enr_actual, enr_max, enr_avail, waitlist_max, waitlist_actual, waitlist_avail = numbers
+
+  if enr_avail < 0 or waitlist_actual < 0: return 0 # weird conditions: return undefined
+  if enr_avail > waitlist_actual: return 1 # open
+  else:
+    if waitlist_avail > 0: return 2
+    else: return 3
+
+"""
+From backend, gets a list of
+user email -->
+  first_time: bool
+  courses -->
+    crn: integer
+    note: string
+    status: integer
+  
+If first time: sends email with status of every class
+Otherwise: sends separate email for each class, only if status changed
+
+After going through all users, notify backend of any class status changes
+"""
+def checkClasses():
+  # Request data from backend
+  geturl = f"{apiBaseUrl}/get_user_classes"
+  posturl = f"{apiBaseUrl}/update_class_statuses"
+
+  response = requests.get(geturl)
+  if response.status_code != 200: return
+  data = response.json()
+
+  # Check courses
+  changedStatus = {} # to send updates to server, only if status changed
+
+  for email in data.keys():
+    currStatuses = {}
+    first = data[email]['first_time']
+
+    # Add courses to currStatuses
+    for courseData in data[email]['courses']:
+      crn = courseData['crn']
+
+      # Find status, update statuses
+      if crn in changedStatus: newStatus = changedStatus[crn]
+      else: newStatus = getClassStatus(courseData['crn'])
+
+      # Update email data
+      if first: currStatuses[crn] = newStatus # first --> just the status
+      elif newStatus != courseData['status']: currStatuses[crn] = (newStatus, courseData['note']) # otherwise --> (status, note)
+
+      if newStatus != courseData['status']: changedStatus[crn] = newStatus
     
-    # get text
-    text = soup.get_text()
-
-    # break into lines and remove leading and trailing space on each
-    lines = (line.strip() for line in text.splitlines())
-    # break multi-headlines into a line each
-    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-    # drop blank lines
-    text = '\n'.join(chunk for chunk in chunks if chunk)
-    
-    return text
+    # Send out emails
+    if first:
+      title = "Classlist Updated"
+      preppedVals = [(crn, statusToText(status)) for crn, status in currStatuses.items()]
+      body = "\n".join([f'{crn}: {text}' for crn, text in preppedVals])
+      send_email(email, title, body)
+    else:
+      for crn, pair in currStatuses.items():
+        statusText = statusToText(pair[0])
+        title = f"{crn} is {statusText}"
+        body = f"Note: {pair[1]}" if pair[1] else ""
+        send_email(email, title, body)
   
-  """
-  Loops through every class, and checks its availability
-  Sends a pushover notification if the availability has changed
-    sends if it changed from closed --> open or open --> closed
-    on the first request, sends it only if it changed from closed --> open
-  """
-  def checkAllClasses(self):
-    for index, arg in enumerate(self.classes):
-      # gatech's course info url
-      req = self.getClassStatus(f"https://registration.banner.gatech.edu/StudentRegistrationSsb/ssb/searchResults/getEnrollmentInfo?term=202308&courseReferenceNumber={arg}")
+  # Update server's courses
+  if len(changedStatus) > 0: response = requests.post(posturl, json=changedStatus)
 
-      # retrieve relevant data
-      enrollment_available = int(req.split("\n")[2].split(" ")[-1])
-      waitlist_actual = int(req.split("\n")[4].split(" ")[-1])
-      open = enrollment_available > waitlist_actual
+"""
+Continuous loop to run function every x seconds
+"""
+def runContinuously(function, interval):
+  while True:
+    start = time.time()
+    function()
+    end = time.time()
 
-      # send pushover req
-      if open != self.previous_state[index]:
-        self.previous_state[index] = open
-
-        openString = "Open" if open else "Closed"
-        descriptor = f"{self.descriptions[index]}\n" if self.descriptions[index] else ""
-
-        params = {
-            "token": APItoken,
-            "user": USERkey,
-            "message": f"{descriptor}{req}",
-            "title": f"{arg} is {openString}",
-            "priority": 0  # Set the priority level (0 for normal)
-        }
-
-        response = requests.post(self.url, data=params)
-  
-  """
-  Continuous loop to check classes every x seconds
-  Params:
-    checks every x seconds
-    sends uptime notification every y checks (aka every x*y seconds)
-  """
-  def runContinuously(self, checkSeconds, uptimeMultiplier):
-    while True:
-      self.statusCheck()
-      for i in range(uptimeMultiplier):
-        print(f"running iteration {i}",flush=True)
-        self.checkAllClasses()
-        time.sleep(checkSeconds)
+    elapsed = end - start
+    wait = interval - elapsed
+    if wait > 0: time.sleep(wait)
 
 if __name__ == "__main__":
-  classesFile = sys.argv[1] if len(sys.argv) > 1 else "classes.txt"
-  mybot = RegistrationBot(classesFile)
-  mybot.runContinuously(3,100)
+  runContinuously(checkClasses, 10)

@@ -10,7 +10,9 @@ Database
 SQL
     for each class
 
+
 Docker commmands:
-docker build --platform linux/amd64 -t registration-1 .
-docker tag registration-1 ahilio/registration-1
-docker push ahilio/registration-1
+docker build -t course-registration-bot:1 .
+docker run \
+    -e apiBaseUrl=http://127.0.0.1:5000 \
+    -d course-registration-bot:1
