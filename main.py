@@ -158,4 +158,4 @@ def runContinuously(function, interval):
     if wait > 0: time.sleep(wait)
 
 if __name__ == "__main__":
-  runContinuously(checkClasses, 10)
+  runContinuously(checkClasses, 0)
